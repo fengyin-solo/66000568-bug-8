@@ -37,7 +37,10 @@ const store = useDAGStore()
 const wfName = ref('data-pipeline')
 function create() { store.createWorkflow(wfName.value) }
 function run() { store.run() }
-onMounted(() => store.connectWS())
+onMounted(() => {
+  store.connectWS()
+  store.restoreLatest()
+})
 onUnmounted(() => store.disconnectWS())
 </script>
 

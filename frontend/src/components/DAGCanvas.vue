@@ -3,8 +3,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useDAGStore } from '../store/dag'
+import type { CircuitBreaker } from '../types'
 const store = useDAGStore()
 const cvs = ref<HTMLCanvasElement>()
 
@@ -47,9 +48,14 @@ function draw() {
   })
 
   // Draw nodes
+  const cbMap = buildCbMap()
   nodes.forEach(n => {
     const {x, y} = nodePos[n.id]
-    const color = STATUS_COLORS[n.status] || '#4a5568'
+    const cb = cbMap[n.id]
+    // 明细处与熔断面板同一数据源：熔断打开/观察中时直接覆盖节点颜色与标签
+    const color = cb && cb.state !== 'CLOSED'
+      ? (cb.state === 'OPEN' ? '#ef4444' : '#fbbf24')
+      : (STATUS_COLORS[n.status] || '#4a5568')
 
     // Glow for running
     if (n.status === 'RUNNING') {
@@ -70,7 +76,17 @@ function draw() {
     ctx.fillStyle = '#e0e0e0'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'
     ctx.fillText(n.name, x, y - 2)
     ctx.fillStyle = '#888'; ctx.font = '9px monospace'
-    ctx.fillText(`${n.status} | 重试${n.retries}`, x, y + 14)
+    if (cb && cb.state !== 'CLOSED') {
+      const left = cooldownLeft(cb)
+      const label = cb.state === 'OPEN'
+        ? `熔断打开${left > 0 ? ' ' + left.toFixed(1) + 's' : ''}`
+        : '观察中'
+      ctx.fillStyle = cb.state === 'OPEN' ? '#f87171' : '#fbbf24'
+      ctx.fillText(label, x, y + 14)
+    } else {
+      ctx.fillStyle = '#888'
+      ctx.fillText(`${n.status} | 重试${n.retries}`, x, y + 14)
+    }
     ctx.textAlign = 'start'
 
     // Duration
@@ -79,6 +95,18 @@ function draw() {
       ctx.fillText(`${(n.endTime - n.startTime).toFixed(1)}s`, rx + 4, ry + rh - 4)
     }
   })
+}
+
+function buildCbMap(): Record<string, CircuitBreaker> {
+  const map: Record<string, CircuitBreaker> = {}
+  for (const cb of store.execution?.circuitBreakers || []) map[cb.taskId] = cb
+  return map
+}
+
+function cooldownLeft(cb: CircuitBreaker): number {
+  const info = store.execution
+  if (cb.state !== 'OPEN' || !info?.serverTime || !info.receivedAt) return 0
+  return Math.max(0, cb.cooldownUntil - info.serverTime - (Date.now() / 1000 - info.receivedAt))
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -90,7 +118,13 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 
 function onMouseMove(e: MouseEvent) {}
 
-onMounted(() => { nextTick(draw) })
+let redrawTimer: ReturnType<typeof setInterval>
+onMounted(() => {
+  nextTick(draw)
+  // 驱动冷却倒计时在明细处走字
+  redrawTimer = setInterval(draw, 200)
+})
+onUnmounted(() => clearInterval(redrawTimer))
 watch(() => [store.workflow, store.execution], draw, { deep: true })
 </script>
 
